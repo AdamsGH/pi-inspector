@@ -1,0 +1,324 @@
+import { strict as assert } from "node:assert";
+import { createServer, get, type IncomingHttpHeaders, type Server as HttpServer } from "node:http";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  connect,
+  createServer as createNetServer,
+  type Server as NetServer,
+  type Socket,
+} from "node:net";
+import { join } from "node:path";
+import { tmpdir, networkInterfaces } from "node:os";
+import { test } from "node:test";
+import { createInspectServer } from "../src/server.ts";
+
+interface HttpResponse {
+  status: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+}
+
+const REQUEST_TIMEOUT_MS = 5_000;
+const TEST_TIMEOUT_MS = 10_000;
+const testOptions = { timeout: TEST_TIMEOUT_MS };
+
+async function listen(server: HttpServer | NetServer, host = "127.0.0.1"): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, host, () => resolve());
+  });
+  const address = server.address();
+  assert(address && typeof address !== "string");
+  return address.port;
+}
+
+async function close(server: HttpServer | NetServer): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+async function makeBuild(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "pi-inspector-server-"));
+  await mkdir(join(root, "dist"));
+  await writeFile(join(root, "index.html"), "<html>built</html>");
+  await writeFile(join(root, "dist", "index.js"), "console.log('built');");
+  await writeFile(join(root, "dist", "index.css"), "body { color: red; }");
+  return root;
+}
+
+async function request(baseUrl: string, requestPath: string): Promise<HttpResponse> {
+  const target = new URL(baseUrl);
+  const hostname = target.hostname.replace(/^\[|\]$/g, "");
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const req = get(
+      {
+        hostname,
+        port: Number(target.port),
+        path: requestPath,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.setTimeout(REQUEST_TIMEOUT_MS, () =>
+          res.destroy(new Error(`Response timed out: ${requestPath}`)),
+        );
+        res.on("error", (error) => finish(() => reject(error)));
+        res.on("end", () =>
+          finish(() =>
+            resolve({
+              status: res.statusCode ?? 0,
+              headers: res.headers,
+              body: Buffer.concat(chunks).toString("utf8"),
+            }),
+          ),
+        );
+      },
+    );
+    timer = setTimeout(
+      () => req.destroy(new Error(`Request timed out: ${requestPath}`)),
+      REQUEST_TIMEOUT_MS,
+    );
+    req.setTimeout(REQUEST_TIMEOUT_MS, () =>
+      req.destroy(new Error(`Request timed out: ${requestPath}`)),
+    );
+    req.on("error", (error) => finish(() => reject(error)));
+  });
+}
+
+interface Forwarder {
+  port: number;
+  server: NetServer;
+  sockets: Set<Socket>;
+}
+
+async function startForwarder(target: URL): Promise<Forwarder> {
+  const sockets = new Set<Socket>();
+  const forwarder = createNetServer((client) => {
+    sockets.add(client);
+    client.once("close", () => sockets.delete(client));
+    const upstream = connect({
+      host: target.hostname.replace(/^\[|\]$/g, ""),
+      port: Number(target.port),
+    });
+    sockets.add(upstream);
+    upstream.once("close", () => {
+      sockets.delete(upstream);
+      client.destroy();
+    });
+    client.once("close", () => upstream.destroy());
+    client.on("error", () => upstream.destroy());
+    upstream.on("error", () => client.destroy());
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  const port = await listen(forwarder);
+  return { port, server: forwarder, sockets };
+}
+
+function waitForText(socket: Socket, text: string, received: { value: string }): Promise<void> {
+  if (received.value.includes(text)) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.off("data", onData);
+      reject(new Error(`SSE timed out waiting for ${text}`));
+    }, REQUEST_TIMEOUT_MS);
+    const onData = (chunk: Buffer): void => {
+      received.value += chunk.toString("utf8");
+      if (received.value.includes(text)) {
+        socket.off("data", onData);
+        clearTimeout(timer);
+        resolve();
+      }
+    };
+    socket.on("data", onData);
+  });
+}
+
+test("binds requested host and port, with usable wildcard and IPv6 URLs", testOptions, async () => {
+  const webDir = await makeBuild();
+  const wildcard = createInspectServer({ host: "0.0.0.0", webDir });
+  const ipv6 = createInspectServer({ host: "::1", webDir });
+  try {
+    const wildcardUrl = await wildcard.start();
+    assert.match(wildcardUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.equal((await request(wildcardUrl, "/")).status, 200);
+    const lan = Object.values(networkInterfaces())
+      .flat()
+      .find((address) => address && !address.internal && address.family === "IPv4");
+    if (lan) {
+      assert.equal(
+        (await request(`http://${lan.address}:${new URL(wildcardUrl).port}`, "/dist/index.js"))
+          .status,
+        200,
+      );
+    }
+
+    const ipv6Url = await ipv6.start();
+    assert.match(ipv6Url, /^http:\/\/\[::1\]:\d+$/);
+    assert.equal((await request(ipv6Url, "/")).status, 200);
+  } finally {
+    await Promise.all([wildcard.stop(), ipv6.stop()]);
+    await rm(webDir, { recursive: true, force: true });
+  }
+});
+
+test("reports EADDRINUSE and can recover after the port is released", testOptions, async () => {
+  const webDir = await makeBuild();
+  const blocker = createServer();
+  const port = await listen(blocker);
+  const server = createInspectServer({ port, webDir });
+  try {
+    await assert.rejects(server.start(), (error: unknown) => {
+      assert.match(String((error as Error).message), /EADDRINUSE/);
+      assert.match(String((error as Error).message), /another process|another port/i);
+      return true;
+    });
+    assert.equal(server.isRunning(), false);
+    await close(blocker);
+    const url = await server.start();
+    assert.equal(Number(new URL(url).port), port);
+    assert.equal((await request(url, "/")).status, 200);
+  } finally {
+    await server.stop();
+    await close(blocker);
+    await rm(webDir, { recursive: true, force: true });
+  }
+});
+
+test(
+  "serves only expected routes with safe assets, MIME types, and nonimmutable caching",
+  testOptions,
+  async () => {
+    const webDir = await makeBuild();
+    const outside = join(webDir, "outside.txt");
+    await writeFile(outside, "private");
+    await symlink(outside, join(webDir, "dist", "leak.txt"));
+    await mkdir(join(webDir, "dist", "directory"));
+    const server = createInspectServer({ webDir });
+    try {
+      const url = await server.start();
+      const html = await request(url, "/?cache=bust");
+      assert.equal(html.status, 200);
+      assert.match(html.headers["content-type"] ?? "", /^text\/html/);
+      assert.equal((await request(url, "/index.html")).status, 200);
+      assert.equal((await request(url, "/dashboard")).status, 404);
+
+      const script = await request(url, "/dist/index.js?cache=bust");
+      assert.equal(script.status, 200);
+      assert.match(script.headers["content-type"] ?? "", /javascript/);
+      assert.doesNotMatch(script.headers["cache-control"] ?? "", /immutable/);
+      const css = await request(url, "/dist/index.css");
+      assert.equal(css.status, 200);
+      assert.match(css.headers["content-type"] ?? "", /^text\/css/);
+      assert.equal(css.headers["x-content-type-options"], "nosniff");
+      const missing = await request(url, "/dist/missing.js");
+      assert.equal(missing.status, 404);
+      assert.match(missing.headers["content-type"] ?? "", /^text\/plain/);
+      assert.equal((await request(url, "/dist/directory")).status, 404);
+      assert.equal((await request(url, "/dist/leak.txt")).status, 404);
+      assert.equal((await request(url, "/dist/%2e%2e/outside.txt")).status, 404);
+      assert.equal((await request(url, "/dist/%2Fetc%2Fpasswd")).status, 404);
+      assert.equal((await request(url, "/dist/%E0%A4%A")).status, 400);
+    } finally {
+      await server.stop();
+      await rm(webDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "fails clearly for a missing web build and starts after the build is supplied",
+  testOptions,
+  async () => {
+    const webDir = await mkdtemp(join(tmpdir(), "pi-inspector-missing-"));
+    const server = createInspectServer({ webDir });
+    try {
+      await assert.rejects(server.start(), (error: unknown) => {
+        assert.match(String((error as Error).message), /npm run build:web/);
+        return true;
+      });
+      assert.equal(server.isRunning(), false);
+      await mkdir(join(webDir, "dist"));
+      await writeFile(join(webDir, "index.html"), "<html>ready</html>");
+      await writeFile(join(webDir, "dist", "index.js"), "ready");
+      await writeFile(join(webDir, "dist", "index.css"), "ready");
+      assert.equal((await request(await server.start(), "/")).status, 200);
+    } finally {
+      await server.stop();
+      await rm(webDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("serves snapshots and flushed SSE through a local TCP forwarder", testOptions, async () => {
+  const webDir = await makeBuild();
+  const server = createInspectServer({ webDir });
+  let forwarder: Forwarder | undefined;
+  let socket: Socket | undefined;
+  try {
+    const serverUrl = await server.start();
+    forwarder = await startForwarder(new URL(serverUrl));
+    const forwardedBase = `http://127.0.0.1:${forwarder.port}`;
+    const snapshot = await request(forwardedBase, "/snapshot");
+    assert.equal(snapshot.status, 200);
+    assert.deepEqual(JSON.parse(snapshot.body), {});
+    assert.equal(snapshot.headers["cache-control"], "no-store");
+    for (const path of ["/", "/dist/index.js", "/dist/index.css"]) {
+      assert.equal((await request(forwardedBase, path)).status, 200);
+    }
+
+    const client = (socket = connect(forwarder.port, "127.0.0.1"));
+    const received = { value: "" };
+    await new Promise<void>((resolve, reject) => {
+      client.setTimeout(REQUEST_TIMEOUT_MS, () => client.destroy(new Error("SSE socket timeout")));
+      client.once("connect", () => {
+        client.write("GET /events HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n");
+        resolve();
+      });
+      client.once("error", reject);
+    });
+    await waitForText(socket, "\r\n\r\n", received);
+    assert.match(received.value, /text\/event-stream/);
+    server.push({ streamed: true });
+    await waitForText(socket, 'data: {"streamed":true}', received);
+    socket.destroy();
+  } finally {
+    socket?.destroy();
+    if (forwarder) {
+      for (const connection of forwarder.sockets) connection.destroy();
+      await close(forwarder.server);
+    }
+    await server.stop();
+    await rm(webDir, { recursive: true, force: true });
+  }
+});
+
+test("stops and restarts cleanly without retaining the old snapshot", testOptions, async () => {
+  const webDir = await makeBuild();
+  const server = createInspectServer({ webDir });
+  try {
+    await server.start();
+    server.push({ old: true });
+    await server.stop();
+    assert.equal(server.isRunning(), false);
+    assert.equal(server.getUrl(), undefined);
+
+    const secondUrl = await server.start();
+    assert.equal(server.isRunning(), true);
+    assert.deepEqual(JSON.parse((await request(secondUrl, "/snapshot")).body), {});
+    assert.equal((await request(secondUrl, "/")).status, 200);
+  } finally {
+    await server.stop();
+    await rm(webDir, { recursive: true, force: true });
+  }
+});

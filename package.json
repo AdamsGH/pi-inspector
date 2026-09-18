@@ -25,14 +25,18 @@
     "src/**/*.html",
     "src/**/*.css",
     "src/web/dist/**",
+    "scripts/build-web.mjs",
     "README.md"
   ],
   "type": "module",
   "scripts": {
-    "build": "bun run build:web",
-    "build:web": "bun build src/web/src/index.tsx --outdir src/web/dist --target=browser --minify",
-    "check": "bun run build:web && bun run typecheck && bun run lint && bun run format:check",
-    "dev:web": "bun build src/web/src/index.tsx --outdir src/web/dist --target=browser --watch",
+    "build": "npm run build:web",
+    "build:web": "node scripts/build-web.mjs",
+    "postinstall": "npm run build:web",
+    "prepack": "npm run build:web",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "check": "npm run build:web && npm test && npm run typecheck && npm run lint && npm run format:check",
+    "dev:web": "node scripts/build-web.mjs --watch",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint src",
@@ -40,6 +44,7 @@
     "typecheck": "tsc"
   },
   "dependencies": {
+    "esbuild": "0.28.2",
     "highlight.js": "^11.12.0",
     "lucide-react": "^1.41.0",
     "react": "^19.2.8",
