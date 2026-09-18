@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { networkInterfaces } from "node:os";
+import { displayAddress } from "./address.ts";
 import {
 	getAgentDir,
 	type ExtensionAPI,
@@ -167,19 +167,7 @@ export default function inspectExtension(pi: ExtensionAPI): void {
 	function describeServer(): string {
 		const url = server?.getUrl();
 		if (!url || !settings) return "pi-inspector not running. Use /inspect to start.";
-		const port = new URL(url).port;
-		const urls = new Set([url]);
-		if (settings.host === "0.0.0.0" || settings.host === "::") {
-			for (const addresses of Object.values(networkInterfaces())) {
-				for (const address of addresses ?? []) {
-					if (address.internal || address.address.includes("%")) continue;
-					if (address.family === "IPv4") urls.add(`http://${address.address}:${port}`);
-					else if (settings.host === "::" && !address.address.startsWith("fe80:"))
-						urls.add(`http://[${address.address}]:${port}`);
-				}
-			}
-		}
-		return `pi-inspector listening on ${settings.host}:${port}\n${[...urls].join("\n")}`;
+		return `pi-inspector listening on ${displayAddress(settings.host, url)}`;
 	}
 
 	async function stopServer(ctx: ExtensionContext): Promise<void> {
