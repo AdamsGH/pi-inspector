@@ -6,6 +6,8 @@ Inspect the current pi session in your browser: live system prompt, full transcr
 
 ## Install
 
+[Bun](https://bun.sh) must be available on `PATH` to build the dashboard during installation.
+
 ```bash
 pi install npm:pi-inspector        # or: pi install ./path/to/pi-inspector
 ```
@@ -57,15 +59,15 @@ Then open `http://127.0.0.1:8080`. Assets, snapshot requests and SSE use the bro
 
 ## Frontend assets and troubleshooting
 
-Installation builds `src/web/dist/index.js` and `index.css` automatically using Node and esbuild, including Git installs without Bun or development dependencies. Packaging builds them again before creating a tarball. If install scripts were disabled, run `npm run build:web` in the package directory. Startup reports missing assets instead of opening a broken dashboard. Missing asset routes return 404, never HTML, and non-hashed bundles are not cached indefinitely.
+Installation builds `src/web/dist/index.js` and `index.css` automatically using Bun's built-in bundler, including Git installs without development dependencies. Packaging builds them again before creating a tarball. If install scripts were disabled or blocked by the package manager, run `bun run build:web` in the package directory. Startup reports missing assets instead of opening a broken dashboard. Missing asset routes return 404, never HTML, and non-hashed bundles are not cached indefinitely.
 
 A JavaScript/CSS MIME error mentioning `text/html` previously meant missing assets were incorrectly served as the HTML page. It was not an SSH forwarding error. `ObjectMultiplex` messages mentioning MetaMask streams originate from browser extensions. The dashboard does not link to `file:///`; if that error persists, check its browser initiator or retry with browser extensions disabled.
 
 ## Development
 
 ```bash
-npm install          # dependencies and frontend build
-npm run check        # build, HTTP/settings tests, types, lint, formatting
+bun install          # dependencies and frontend build
+bun run check        # build, HTTP/settings tests, types, lint, formatting
 pi -e ./src/index.ts  # run the extension directly
 ```
 

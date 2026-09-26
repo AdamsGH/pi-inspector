@@ -98,7 +98,7 @@ function validateBuild(configuredWebDir: string): BuildPaths {
 
 	if (!webRoot || missing.length > 0 || !htmlPath || !distRoot) {
 		throw new Error(
-			`pi-inspector web build is missing ${missing.join(", ") || "required files"}. Run npm run build:web before starting the inspector.`,
+			`pi-inspector web build is missing ${missing.join(", ") || "required files"}. Run bun run build:web before starting the inspector.`,
 		);
 	}
 

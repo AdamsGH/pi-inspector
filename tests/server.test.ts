@@ -244,7 +244,7 @@ test(
     const server = createInspectServer({ webDir });
     try {
       await assert.rejects(server.start(), (error: unknown) => {
-        assert.match(String((error as Error).message), /npm run build:web/);
+        assert.match(String((error as Error).message), /bun run build:web/);
         return true;
       });
       assert.equal(server.isRunning(), false);
