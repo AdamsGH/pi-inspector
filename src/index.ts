@@ -55,15 +55,15 @@ export default function inspectExtension(pi: ExtensionAPI): void {
 	for (const event of REFRESH_EVENTS) {
 		(pi.on as (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => void)(
 			event,
-			(_event, ctx) => schedulePush(() => buildSnapshot(ctx)),
+			(_event, ctx) => schedulePush(() => buildSnapshot(ctx), ctx),
 		);
 	}
-	pi.on("message_update", (_event, ctx) => schedulePush(() => buildSnapshot(ctx)));
+	pi.on("message_update", (_event, ctx) => schedulePush(() => buildSnapshot(ctx), ctx));
 
 	// Capture the fully-assembled system prompt each turn.
 	pi.on("before_agent_start", (event, ctx) => {
 		lastSystemPrompt = event.systemPrompt;
-		schedulePush(() => buildSnapshot(ctx));
+		schedulePush(() => buildSnapshot(ctx), ctx);
 	});
 	pi.on("session_start", (_event, ctx) => {
 		lastSystemPrompt = ctx.getSystemPrompt();
@@ -112,8 +112,14 @@ export default function inspectExtension(pi: ExtensionAPI): void {
 				}
 			}
 			const snapshot = buildSnapshot(ctx);
-			if (snapshot !== undefined) server.push(snapshot);
+			const snapshotAccepted = snapshot === undefined || server.push(snapshot);
 			ctx.ui.notify(describeServer(), "info");
+			if (!snapshotAccepted) {
+				ctx.ui.notify(
+					"pi-inspector could not serialize the session snapshot. Check for cyclic, excessively deep, or unsupported session data.",
+					"error",
+				);
+			}
 			if (sub !== "start") openBrowser(server.getUrl()!);
 		},
 	});
@@ -134,8 +140,6 @@ export default function inspectExtension(pi: ExtensionAPI): void {
 				idle: ctx.isIdle(),
 				systemPrompt: lastSystemPrompt ?? ctx.getSystemPrompt(),
 				entries: sm.getEntries(),
-				tree: sm.getTree(),
-				branch: sm.getBranch(),
 				leafId: sm.getLeafId(),
 				commands: pi.getCommands(),
 				tools: pi.getAllTools(),
@@ -149,7 +153,7 @@ export default function inspectExtension(pi: ExtensionAPI): void {
 	}
 
 	/** Throttled push: coalesce bursts (e.g. streaming deltas) into one broadcast. */
-	function schedulePush(builder: () => unknown): void {
+	function schedulePush(builder: () => unknown, ctx: ExtensionContext): void {
 		if (!server?.isRunning()) return;
 		pendingBuilder = builder;
 		if (pushTimer) return;
@@ -159,7 +163,12 @@ export default function inspectExtension(pi: ExtensionAPI): void {
 			pendingBuilder = undefined;
 			if (server?.isRunning() && pending) {
 				const snapshot = pending();
-				if (snapshot !== undefined) server.push(snapshot);
+				if (snapshot !== undefined && !server.push(snapshot)) {
+					ctx.ui.notify(
+						"pi-inspector could not serialize the session snapshot. Check for cyclic, excessively deep, or unsupported session data.",
+						"error",
+					);
+				}
 			}
 		}, 100);
 	}

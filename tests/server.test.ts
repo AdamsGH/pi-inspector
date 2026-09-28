@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { spawnSync } from "node:child_process";
 import { createServer, get, type IncomingHttpHeaders, type Server as HttpServer } from "node:http";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import {
@@ -301,6 +302,147 @@ test("serves snapshots and flushed SSE through a local TCP forwarder", testOptio
     await server.stop();
     await rm(webDir, { recursive: true, force: true });
   }
+});
+
+test(
+  "caches large snapshots for HTTP and SSE and reports serialization failures safely",
+  testOptions,
+  async () => {
+    const webDir = await makeBuild();
+    const server = createInspectServer({ webDir });
+    let socket: Socket | undefined;
+    try {
+      const url = await server.start();
+      const entries = Array.from({ length: 12_000 }, (_, i) => ({
+        id: `entry-${i}`,
+        parentId: i ? `entry-${i - 1}` : null,
+        type: "custom",
+        timestamp: new Date(i).toISOString(),
+        customType: "test",
+      }));
+      const snapshot = { entries, capturedAt: 1 };
+      assert.equal(server.push(snapshot), true);
+      entries[0]!.customType = "mutated after push";
+      const fetched = await request(url, "/snapshot");
+      assert.equal(fetched.status, 200);
+      const parsed = JSON.parse(fetched.body);
+      assert.equal(parsed.entries.length, 12_000);
+      assert.equal(parsed.entries[0].customType, "test");
+      assert.equal("tree" in parsed, false);
+
+      socket = connect(Number(new URL(url).port), "127.0.0.1");
+      const received = { value: "" };
+      await new Promise<void>((resolve, reject) => {
+        socket!.setTimeout(REQUEST_TIMEOUT_MS, () => socket!.destroy(new Error("SSE timeout")));
+        socket!.once("connect", () => {
+          socket!.write(
+            "GET /events HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+          );
+          resolve();
+        });
+        socket!.once("error", reject);
+      });
+      await waitForText(socket, '"capturedAt":1', received);
+      assert.match(received.value, /"id":"entry-11999"/);
+      assert.equal(server.push({ ...snapshot, live: true }), true);
+      await waitForText(socket, '"live":true', received);
+      const cycle: Record<string, unknown> = {};
+      cycle.self = cycle;
+      const errorEvent = waitForText(socket, "SNAPSHOT_SERIALIZATION_FAILED", received);
+      assert.equal(server.push(cycle), false);
+      await errorEvent;
+      const failed = await request(url, "/snapshot");
+      assert.equal(failed.status, 500);
+      const error = JSON.parse(failed.body);
+      assert.equal(error.error.code, "SNAPSHOT_SERIALIZATION_FAILED");
+      assert.doesNotMatch(failed.body, /entry-11999|self/);
+      const recoveryEvent = waitForText(socket, '"recovered":true', received);
+      assert.equal(server.push({ recovered: true }), true);
+      await recoveryEvent;
+      assert.deepEqual(JSON.parse((await request(url, "/snapshot")).body), { recovered: true });
+
+      const getter = Object.defineProperty({}, "bad", {
+        enumerable: true,
+        get() {
+          throw new Error("secret value");
+        },
+      });
+      assert.equal(server.push(getter), false);
+      assert.doesNotMatch((await request(url, "/snapshot")).body, /secret value/);
+      const deep: Record<string, unknown> = {};
+      let cursor = deep;
+      for (let i = 0; i < 20_000; i++) {
+        const next: Record<string, unknown> = {};
+        cursor.next = next;
+        cursor = next;
+      }
+      // A custom JSON method triggers the recursive serializer path even on runtimes
+      // whose fast path can serialize deeply nested plain objects iteratively.
+      const deepAccepted = server.push({
+        deep,
+        tool: {
+          toJSON() {
+            return {};
+          },
+        },
+      });
+      if (!deepAccepted) {
+        const deepResponse = await request(url, "/snapshot");
+        assert.equal(deepResponse.status, 500);
+        assert.equal(JSON.parse(deepResponse.body).error.code, "SNAPSHOT_SERIALIZATION_FAILED");
+      } else {
+        assert.equal((await request(url, "/snapshot")).status, 200);
+      }
+      await server.stop();
+      const restartedUrl = await server.start();
+      assert.deepEqual(JSON.parse((await request(restartedUrl, "/snapshot")).body), {});
+    } finally {
+      socket?.destroy();
+      await server.stop();
+      await rm(webDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "replays snapshot errors to new SSE clients and recovers without restarting",
+  testOptions,
+  async () => {
+    const webDir = await makeBuild();
+    const server = createInspectServer({ webDir });
+    try {
+      const url = await server.start();
+      assert.equal(server.push({ unsupported: 1n }), false);
+      const events = await fetch(`${url}/events`, {
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      const reader = events.body!.getReader();
+      try {
+        let frame = "";
+        const decoder = new TextDecoder();
+        while (!frame.includes("\n\n")) {
+          const chunk = await reader.read();
+          assert.equal(chunk.done, false);
+          frame += decoder.decode(chunk.value, { stream: true });
+        }
+        assert.equal(JSON.parse(frame.slice(6).trim()).error.code, "SNAPSHOT_SERIALIZATION_FAILED");
+      } finally {
+        await reader.cancel();
+      }
+      assert.equal(server.push({ recovered: true }), true);
+      assert.deepEqual(JSON.parse((await request(url, "/snapshot")).body), { recovered: true });
+    } finally {
+      await server.stop();
+      await rm(webDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("reproduces legacy snapshot stringify overflow with toJSON in an isolated child", () => {
+  const script =
+    "let node = { id: 0 }; for (let i = 1; i < 15518; i++) node = { id: i, children: [node] }; try { JSON.stringify({ entries: [], tree: [node], tool: { toJSON() { return {}; } } }); process.exit(0); } catch (error) { if (error instanceof RangeError) process.exit(42); throw error; }";
+  const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
+  assert.equal(result.status, 42, result.stderr);
 });
 
 test("stops and restarts cleanly without retaining the old snapshot", testOptions, async () => {

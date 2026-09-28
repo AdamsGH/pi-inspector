@@ -11,7 +11,7 @@ import { DetailPanel } from "./components/Detail/DetailPanel.tsx";
 import { Resizer } from "./components/common/Resizer.tsx";
 
 export const App: React.FC = () => {
-	const { snapshot, status, lastUpdated, refresh } = useInspectEvents();
+	const { snapshot, snapshotError, status, lastUpdated, refresh } = useInspectEvents();
 	const {
 		leftW,
 		detailH,
@@ -64,6 +64,11 @@ export const App: React.FC = () => {
 				sidebarCollapsed={sidebarCollapsed}
 				onToggleSidebar={toggleSidebarCollapse}
 			/>
+			{snapshotError && (
+				<div role="alert" style={{ color: "#f85149", padding: 8 }}>
+					{snapshotError}
+				</div>
+			)}
 
 			<main className="app-main" ref={containerRef}>
 				{!sidebarCollapsed && (

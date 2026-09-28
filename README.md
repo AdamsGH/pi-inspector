@@ -61,7 +61,7 @@ Then open `http://127.0.0.1:8080`. Assets, snapshot requests and SSE use the bro
 
 Installation builds `src/web/dist/index.js` and `index.css` automatically using Bun's built-in bundler, including Git installs without development dependencies. Packaging builds them again before creating a tarball. If install scripts were disabled or blocked by the package manager, run `bun run build:web` in the package directory. Startup reports missing assets instead of opening a broken dashboard. Missing asset routes return 404, never HTML, and non-hashed bundles are not cached indefinitely.
 
-A JavaScript/CSS MIME error mentioning `text/html` previously meant missing assets were incorrectly served as the HTML page. It was not an SSH forwarding error. `ObjectMultiplex` messages mentioning MetaMask streams originate from browser extensions. The dashboard does not link to `file:///`; if that error persists, check its browser initiator or retry with browser extensions disabled.
+A JavaScript/CSS MIME error mentioning `text/html` previously meant missing assets were incorrectly served as the HTML page. It was not an SSH forwarding error. `ObjectMultiplex` messages mentioning MetaMask streams originate from browser extensions. The dashboard does not link to `file:///`; if that error persists, check its browser initiator or retry with browser extensions disabled. If the dashboard reports that a snapshot could not be serialized, refresh the session and check for unsupported or cyclic custom session data. The error is sanitized, and a later valid snapshot recovers automatically.
 
 ## Development
 

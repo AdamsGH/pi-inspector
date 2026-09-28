@@ -94,8 +94,6 @@ export interface SessionSnapshot {
 	idle?: boolean;
 	systemPrompt?: string;
 	entries?: SessionEntry[];
-	tree?: SessionTreeNode[];
-	branch?: string[];
 	leafId?: string;
 	commands?: (SlashCommandInfo | { name?: string; description?: string })[];
 	tools?: ToolInfo[];

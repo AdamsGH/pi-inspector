@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import type { SessionSnapshot } from "../types.ts";
+import { createSnapshotUpdates, type SnapshotUpdate } from "../utils/snapshotUpdates.ts";
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
@@ -7,70 +8,76 @@ export function useInspectEvents() {
 	const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
 	const [status, setStatus] = useState<ConnectionStatus>("connecting");
 	const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+	const [snapshotError, setSnapshotError] = useState<string | null>(null);
+	const [updates] = useState(() =>
+		createSnapshotUpdates((data) => {
+			if ("error" in data) {
+				setSnapshotError(data.error.message);
+				return;
+			}
+			setSnapshotError(null);
+			if (Object.keys(data).length > 0) {
+				setSnapshot(data);
+				setLastUpdated(new Date(data.capturedAt || Date.now()));
+			}
+		}),
+	);
 
 	const fetchSnapshot = useCallback(async () => {
 		try {
-			const res = await fetch("/snapshot");
-			if (res.ok) {
-				const data = (await res.json()) as SessionSnapshot;
-				if (data && Object.keys(data).length > 0) {
-					setSnapshot(data);
-					setLastUpdated(new Date(data.capturedAt || Date.now()));
+			await updates.refresh(async () => {
+				const res = await fetch("/snapshot");
+				const data = (await res.json()) as SnapshotUpdate;
+				if (!res.ok) {
+					return {
+						error: {
+							message:
+								"error" in data ? data.error.message : "Snapshot unavailable. Refresh to retry.",
+						},
+					};
 				}
-			}
+				return data;
+			});
 		} catch {
-			// Best effort fetch
+			// A failed request must not replace the last delivered snapshot or error.
 		}
-	}, []);
+	}, [updates]);
 
 	useEffect(() => {
 		let isMounted = true;
 		setStatus("connecting");
-
-		// Initial pull
 		fetchSnapshot();
-
 		const es = new EventSource("/events");
 
 		const handleOpen = () => {
-			if (!isMounted) return;
-			setStatus("connected");
+			if (isMounted) setStatus("connected");
 		};
-
 		const handleError = () => {
-			if (!isMounted) return;
-			setStatus("disconnected");
+			if (isMounted) setStatus("disconnected");
 		};
-
 		const handleMessage = (ev: MessageEvent) => {
 			if (!isMounted) return;
 			try {
-				const data = JSON.parse(ev.data) as SessionSnapshot;
+				const data = JSON.parse(ev.data) as SnapshotUpdate;
+				updates.receive(data);
 				setStatus("connected");
-				setSnapshot(data);
-				setLastUpdated(new Date(data.capturedAt || Date.now()));
 			} catch {
-				// Ignore malformed snapshot chunk
+				// Ignore malformed snapshot chunks.
 			}
 		};
-
 		es.addEventListener("open", handleOpen);
 		es.addEventListener("error", handleError);
 		es.addEventListener("message", handleMessage);
 
 		return () => {
 			isMounted = false;
+			updates.cancel();
 			es.removeEventListener("open", handleOpen);
 			es.removeEventListener("error", handleError);
 			es.removeEventListener("message", handleMessage);
 			es.close();
 		};
-	}, [fetchSnapshot]);
+	}, [fetchSnapshot, updates]);
 
-	return {
-		snapshot,
-		status,
-		lastUpdated,
-		refresh: fetchSnapshot,
-	};
+	return { snapshot, snapshotError, status, lastUpdated, refresh: fetchSnapshot };
 }

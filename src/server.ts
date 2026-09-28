@@ -29,7 +29,7 @@ export interface InspectServer {
 	/** Stop the server and disconnect all SSE clients. */
 	stop(): Promise<void>;
 	/** Broadcast a snapshot to all connected clients and cache it for future connections. */
-	push(snapshot: unknown): void;
+	push(snapshot: unknown): boolean;
 	/** Whether the server is currently listening. */
 	isRunning(): boolean;
 	/** The base URL, if started. */
@@ -155,14 +155,15 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 	const configuredWebDir = resolve(options.webDir ?? defaultWebDir);
 	let httpServer: HttpServer | undefined;
 	let url: string | undefined;
-	let lastSnapshot: unknown;
+	let lastSnapshotText: string | undefined;
+	let snapshotErrorText: string | undefined;
 	let activeBuild: BuildPaths | undefined;
 	let startPromise: Promise<string> | undefined;
 	let stopPromise: Promise<void> | undefined;
 	const clients = new Set<ServerResponse>();
 
-	function broadcast(data: unknown): void {
-		const body = `data: ${JSON.stringify(data) ?? "null"}\n\n`;
+	function broadcastText(text: string): void {
+		const body = `data: ${text}\n\n`;
 		for (const res of clients) {
 			try {
 				res.write(body);
@@ -190,8 +191,9 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 				"X-Content-Type-Options": "nosniff",
 			});
 			res.flushHeaders();
-			if (lastSnapshot !== undefined) {
-				res.write(`data: ${JSON.stringify(lastSnapshot) ?? "null"}\n\n`);
+			const replayText = snapshotErrorText ?? lastSnapshotText;
+			if (replayText !== undefined) {
+				res.write(`data: ${replayText}\n\n`);
 			}
 			clients.add(res);
 			req.on("close", () => clients.delete(res));
@@ -199,12 +201,21 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 		}
 
 		if (path === "/snapshot") {
+			if (snapshotErrorText !== undefined) {
+				res.writeHead(500, {
+					"Content-Type": "application/json; charset=utf-8",
+					"Cache-Control": "no-store",
+					"X-Content-Type-Options": "nosniff",
+				});
+				res.end(snapshotErrorText);
+				return;
+			}
 			res.writeHead(200, {
 				"Content-Type": "application/json",
 				"Cache-Control": "no-store",
 				"X-Content-Type-Options": "nosniff",
 			});
-			res.end(lastSnapshot === undefined ? "{}" : (JSON.stringify(lastSnapshot) ?? "null"));
+			res.end(lastSnapshotText ?? "{}");
 			return;
 		}
 
@@ -338,7 +349,8 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 				httpServer = undefined;
 				url = undefined;
 				activeBuild = undefined;
-				lastSnapshot = undefined;
+				lastSnapshotText = undefined;
+				snapshotErrorText = undefined;
 			})();
 			stopPromise = pending;
 			try {
@@ -347,9 +359,25 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 				if (stopPromise === pending) stopPromise = undefined;
 			}
 		},
-		push(snapshot: unknown): void {
-			lastSnapshot = snapshot;
-			if (clients.size > 0) broadcast(snapshot);
+		push(snapshot: unknown): boolean {
+			try {
+				const text = JSON.stringify(snapshot) ?? "null";
+				lastSnapshotText = text;
+				snapshotErrorText = undefined;
+				if (clients.size > 0) broadcastText(text);
+				return true;
+			} catch {
+				lastSnapshotText = undefined;
+				snapshotErrorText = JSON.stringify({
+					error: {
+						code: "SNAPSHOT_SERIALIZATION_FAILED",
+						message:
+							"Snapshot could not be serialized. Check for cyclic, excessively deep, or unsupported session data, then refresh.",
+					},
+				});
+				if (clients.size > 0) broadcastText(snapshotErrorText);
+				return false;
+			}
 		},
 		isRunning(): boolean {
 			return httpServer !== undefined;
