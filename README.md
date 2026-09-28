@@ -27,7 +27,7 @@ The listen URL is also shown in the pi footer status bar.
 - **Left column**: session metadata, system prompt (copyable, from `before_agent_start` — the fully-assembled per-turn prompt), slash commands, and tool definitions
 - **Right column**: transcript rendered as a tree (roles color-coded, active branch highlighted); click any entry to view its complete raw JSON (all internal fields) with `highlight.js` syntax highlighting
 - **Resizable panels**: drag the divider between the left/right columns and between the tree and detail panes (positions are remembered in `localStorage`)
-- **Live updates**: pi events (`message_*`, `turn_*`, `tool_execution_*`, `agent_*`, `session_*`, `model_select`, …) are coalesced and pushed to the browser over SSE — no polling
+- **Live updates**: pi events (`message_*`, `turn_*`, `tool_execution_*`, `agent_*`, `session_*`, `model_select`, …) are coalesced and pushed to the browser over SSE — no polling. Slow connections receive the latest snapshot after their current write drains, rather than accumulating a queue of old snapshots. The complete transcript is preserved.
 - Server defaults to `127.0.0.1` with an ephemeral port; session data is not written to disk
 
 ## Network settings
@@ -58,6 +58,8 @@ ssh -N -L 8080:127.0.0.1:34287 user@pi-host
 Then open `http://127.0.0.1:8080`. Assets, snapshot requests and SSE use the browser's origin, so the forwarded local port may differ from the server port.
 
 ## Frontend assets and troubleshooting
+
+Up to eight dashboard SSE connections can be open per inspector instance. Additional connections receive HTTP 503 and can reconnect after a tab closes. Each slow connection can retain one submitted snapshot, plus the server's shared latest snapshot. Memory still depends on the size of the session and number of open tabs, but does not grow with a backlog of updates. On slow networks, intermediate views may be skipped. Transcript entries are not removed.
 
 Installation builds `src/web/dist/index.js` and `index.css` automatically using Bun's built-in bundler, including Git installs without development dependencies. Packaging builds them again before creating a tarball. If install scripts were disabled or blocked by the package manager, run `bun run build:web` in the package directory. Startup reports missing assets instead of opening a broken dashboard. Missing asset routes return 404, never HTML, and non-hashed bundles are not cached indefinitely.
 

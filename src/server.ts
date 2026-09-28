@@ -42,6 +42,19 @@ export interface InspectServerOptions {
 	webDir?: string;
 }
 
+/** Maximum number of concurrent SSE dashboard connections. */
+export const MAX_EVENT_STREAM_CLIENTS = 8;
+
+interface EventStreamClient {
+	response: ServerResponse;
+	request: IncomingMessage;
+	blocked: boolean;
+	sentRevision: number;
+	onClose: () => void;
+	onDrain: () => void;
+	onError: () => void;
+}
+
 interface BuildPaths {
 	webRoot: string;
 	distRoot: string;
@@ -157,20 +170,61 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 	let url: string | undefined;
 	let lastSnapshotText: string | undefined;
 	let snapshotErrorText: string | undefined;
+	let snapshotRevision = 0;
 	let activeBuild: BuildPaths | undefined;
 	let startPromise: Promise<string> | undefined;
 	let stopPromise: Promise<void> | undefined;
-	const clients = new Set<ServerResponse>();
+	const clients = new Set<EventStreamClient>();
 
-	function broadcastText(text: string): void {
-		const body = `data: ${text}\n\n`;
-		for (const res of clients) {
-			try {
-				res.write(body);
-			} catch {
-				clients.delete(res);
-			}
+	function removeClient(client: EventStreamClient): void {
+		if (!clients.delete(client)) return;
+		client.response.off("drain", client.onDrain);
+		client.response.off("close", client.onClose);
+		client.response.off("error", client.onError);
+		client.request.off("aborted", client.onClose);
+	}
+
+	function writeLatest(client: EventStreamClient): void {
+		if (client.blocked || !clients.has(client)) return;
+		const text = snapshotErrorText ?? lastSnapshotText;
+		if (text === undefined || client.sentRevision === snapshotRevision) return;
+		try {
+			client.blocked = !client.response.write(`data: ${text}\n\n`);
+			client.sentRevision = snapshotRevision;
+		} catch {
+			removeClient(client);
+			client.response.destroy();
 		}
+	}
+
+	function addClient(req: IncomingMessage, res: ServerResponse): EventStreamClient | undefined {
+		if (clients.size >= MAX_EVENT_STREAM_CLIENTS) return undefined;
+		const client: EventStreamClient = {
+			response: res,
+			request: req,
+			blocked: false,
+			sentRevision: -1,
+			onClose: () => removeClient(client),
+			onError: () => {
+				removeClient(client);
+				res.destroy();
+			},
+			onDrain: () => {
+				client.blocked = false;
+				writeLatest(client);
+			},
+		};
+		clients.add(client);
+		res.on("close", client.onClose);
+		res.on("error", client.onError);
+		req.on("aborted", client.onClose);
+		res.on("drain", client.onDrain);
+		writeLatest(client);
+		return client;
+	}
+
+	function broadcastLatest(): void {
+		for (const client of clients) writeLatest(client);
 	}
 
 	const server: HttpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -184,6 +238,14 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 		}
 
 		if (path === "/events") {
+			if (clients.size >= MAX_EVENT_STREAM_CLIENTS) {
+				res.writeHead(503, {
+					"Content-Type": "text/plain; charset=utf-8",
+					"Cache-Control": "no-cache",
+				});
+				res.end("Too many event stream clients");
+				return;
+			}
 			res.writeHead(200, {
 				"Content-Type": "text/event-stream",
 				"Cache-Control": "no-cache",
@@ -191,12 +253,7 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 				"X-Content-Type-Options": "nosniff",
 			});
 			res.flushHeaders();
-			const replayText = snapshotErrorText ?? lastSnapshotText;
-			if (replayText !== undefined) {
-				res.write(`data: ${replayText}\n\n`);
-			}
-			clients.add(res);
-			req.on("close", () => clients.delete(res));
+			addClient(req, res);
 			return;
 		}
 
@@ -331,8 +388,10 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 						// A failed start leaves the server available for a later retry.
 					}
 				}
-				for (const res of clients) res.end();
-				clients.clear();
+				for (const client of clients) {
+					removeClient(client);
+					client.response.end();
+				}
 				if (server.listening) {
 					const closePromise = new Promise<void>((resolveClose, rejectClose) => {
 						server.close((error) => {
@@ -351,6 +410,7 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 				activeBuild = undefined;
 				lastSnapshotText = undefined;
 				snapshotErrorText = undefined;
+				snapshotRevision = 0;
 			})();
 			stopPromise = pending;
 			try {
@@ -364,7 +424,8 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 				const text = JSON.stringify(snapshot) ?? "null";
 				lastSnapshotText = text;
 				snapshotErrorText = undefined;
-				if (clients.size > 0) broadcastText(text);
+				snapshotRevision++;
+				if (clients.size > 0) broadcastLatest();
 				return true;
 			} catch {
 				lastSnapshotText = undefined;
@@ -375,7 +436,8 @@ export function createInspectServer(options: InspectServerOptions = {}): Inspect
 							"Snapshot could not be serialized. Check for cyclic, excessively deep, or unsupported session data, then refresh.",
 					},
 				});
-				if (clients.size > 0) broadcastText(snapshotErrorText);
+				snapshotRevision++;
+				if (clients.size > 0) broadcastLatest();
 				return false;
 			}
 		},
