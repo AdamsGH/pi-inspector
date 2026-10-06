@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { isIP } from "node:net";
 import { join } from "node:path";
 
@@ -7,30 +7,13 @@ export interface InspectorSettings {
 	port: number;
 }
 
-function readSettings(path: string): Record<string, unknown> {
-	let text: string;
-	try {
-		text = readFileSync(path, "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-		throw new Error(`pi-inspector: cannot read ${path}`, { cause: error });
+function inspectorSettings(settings: object, path: string): Record<string, unknown> {
+	const value = (settings as Record<string, unknown>)["pi-inspector"];
+	if (value === undefined) return {};
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(`pi-inspector: invalid settings in ${path}: "pi-inspector" must be an object`);
 	}
-	try {
-		const settings: unknown = JSON.parse(text);
-		if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
-			throw new Error("expected a JSON object");
-		}
-		const value = (settings as Record<string, unknown>)["pi-inspector"];
-		if (value === undefined) return {};
-		if (!value || typeof value !== "object" || Array.isArray(value)) {
-			throw new Error('"pi-inspector" must be an object');
-		}
-		return value as Record<string, unknown>;
-	} catch (error) {
-		throw new Error(`pi-inspector: invalid settings in ${path}: ${String(error)}`, {
-			cause: error,
-		});
-	}
+	return value as Record<string, unknown>;
 }
 
 /** Re-read settings on each start. Untrusted project settings never affect network exposure. */
@@ -39,11 +22,23 @@ export function loadInspectorSettings(
 	cwd: string,
 	projectTrusted: boolean,
 ): InspectorSettings {
+	const paths = {
+		global: join(agentDir, "settings.json"),
+		project: join(cwd, ".pi", "settings.json"),
+	};
+	const settings = SettingsManager.create(cwd, agentDir, { projectTrusted });
+	const errors = settings.drainErrors();
+	if (errors.length > 0) {
+		throw new Error(
+			`pi-inspector: invalid settings in ${errors.map(({ scope, error }) => `${paths[scope]}: ${error.message}`).join("; ")}`,
+			{ cause: errors[0]!.error },
+		);
+	}
 	const value = {
 		host: "127.0.0.1",
 		port: 0,
-		...readSettings(join(agentDir, "settings.json")),
-		...(projectTrusted ? readSettings(join(cwd, ".pi", "settings.json")) : {}),
+		...inspectorSettings(settings.getGlobalSettings(), paths.global),
+		...(projectTrusted ? inspectorSettings(settings.getProjectSettings(), paths.project) : {}),
 	};
 	for (const key of Object.keys(value)) {
 		if (key !== "host" && key !== "port") {

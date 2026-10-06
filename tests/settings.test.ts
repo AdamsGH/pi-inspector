@@ -35,6 +35,66 @@ test("safe defaults, global LAN configuration, trusted project field overrides",
   assert.deepEqual(loadInspectorSettings(f.agent, f.cwd, false), { host: "::1", port: 0 });
 });
 
+test("BOM-prefixed settings preserve per-field overrides and explicit project trust", (t) => {
+  const f = fixture(t);
+  writeFileSync(
+    join(f.agent, "settings.json"),
+    "\uFEFF" + JSON.stringify({ "pi-inspector": { host: "127.0.0.1", port: 34287 } }),
+  );
+  writeFileSync(
+    join(f.cwd, ".pi", "settings.json"),
+    "\uFEFF" + JSON.stringify({ "pi-inspector": { host: "0.0.0.0" } }),
+  );
+  assert.deepEqual(loadInspectorSettings(f.agent, f.cwd, false), {
+    host: "127.0.0.1",
+    port: 34287,
+  });
+  assert.deepEqual(loadInspectorSettings(f.agent, f.cwd, true), { host: "0.0.0.0", port: 34287 });
+  assert.deepEqual(loadInspectorSettings(f.agent, f.cwd, false), {
+    host: "127.0.0.1",
+    port: 34287,
+  });
+});
+
+test("settings load errors prevent fallback and recover after correction", (t) => {
+  const f = fixture(t);
+  f.project({ "pi-inspector": { host: "0.0.0.0" } });
+  const globalPath = join(f.agent, "settings.json");
+  writeFileSync(globalPath, "{broken");
+  for (const trusted of [false, true]) {
+    assert.throws(
+      () => loadInspectorSettings(f.agent, f.cwd, trusted),
+      (error: Error) => {
+        assert.ok(error.message.includes(globalPath));
+        assert.ok(error.cause instanceof SyntaxError);
+        return true;
+      },
+    );
+  }
+  rmSync(globalPath);
+  mkdirSync(globalPath);
+  assert.throws(
+    () => loadInspectorSettings(f.agent, f.cwd, true),
+    /invalid settings.*settings.json/,
+  );
+  rmSync(globalPath, { recursive: true });
+  f.global({ "pi-inspector": { port: 12345 } });
+  assert.deepEqual(loadInspectorSettings(f.agent, f.cwd, true), { host: "0.0.0.0", port: 12345 });
+});
+
+test("invalid inspector sections are rejected before merging", (t) => {
+  const f = fixture(t);
+  for (const value of [null, [], "0.0.0.0"]) {
+    f.global({ "pi-inspector": value });
+    f.project({ "pi-inspector": { host: "127.0.0.1", port: 12345 } });
+    assert.throws(() => loadInspectorSettings(f.agent, f.cwd, true), /must be an object/);
+    f.global({ "pi-inspector": { host: "127.0.0.1" } });
+    f.project({ "pi-inspector": value });
+    assert.throws(() => loadInspectorSettings(f.agent, f.cwd, true), /must be an object/);
+    assert.deepEqual(loadInspectorSettings(f.agent, f.cwd, false), { host: "127.0.0.1", port: 0 });
+  }
+});
+
 test("malformed untrusted project settings are not read", (t) => {
   const f = fixture(t);
   writeFileSync(join(f.cwd, ".pi", "settings.json"), "{broken");

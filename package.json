@@ -31,8 +31,6 @@
   "scripts": {
     "build": "bun run build:web",
     "build:web": "bun build src/web/src/index.tsx --outdir src/web/dist --target=browser --minify",
-    "postinstall": "bun run build:web",
-    "prepack": "bun run build:web",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "check": "bun run build:web && bun run test && bun run typecheck && bun run lint && bun run format:check",
     "dev:web": "bun build src/web/src/index.tsx --outdir src/web/dist --target=browser --watch",

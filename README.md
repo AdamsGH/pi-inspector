@@ -6,10 +6,18 @@ Inspect the current pi session in your browser: live system prompt, full transcr
 
 ## Install
 
-[Bun](https://bun.sh) must be available on `PATH` to build the dashboard during installation.
+The npm package includes the built dashboard. Installing it does not require Bun.
 
 ```bash
-pi install npm:pi-inspector        # or: pi install ./path/to/pi-inspector
+pi install npm:pi-inspector
+```
+
+For Git or local-source installations, build the dashboard with [Bun](https://bun.sh) in the package directory before starting the inspector:
+
+```bash
+bun install
+bun run build:web
+pi install ./path/to/pi-inspector
 ```
 
 ## Usage
@@ -61,14 +69,14 @@ Then open `http://127.0.0.1:8080`. Assets, snapshot requests and SSE use the bro
 
 Up to eight dashboard SSE connections can be open per inspector instance. Additional connections receive HTTP 503 and can reconnect after a tab closes. Each slow connection can retain one submitted snapshot, plus the server's shared latest snapshot. Memory still depends on the size of the session and number of open tabs, but does not grow with a backlog of updates. On slow networks, intermediate views may be skipped. Transcript entries are not removed.
 
-Installation builds `src/web/dist/index.js` and `index.css` automatically using Bun's built-in bundler, including Git installs without development dependencies. Packaging builds them again before creating a tarball. If install scripts were disabled or blocked by the package manager, run `bun run build:web` in the package directory. Startup reports missing assets instead of opening a broken dashboard. Missing asset routes return 404, never HTML, and non-hashed bundles are not cached indefinitely.
+The npm package includes `src/web/dist/index.js` and `index.css`. Installation and packaging do not run a build hook. For Git or local-source installations, or after frontend changes, run `bun run build:web` in the package directory. Before publishing, run `bun run check` to build and verify the assets, then `npm pack` or `npm publish`. Startup reports missing assets instead of opening a broken dashboard. Missing asset routes return 404, never HTML, and non-hashed bundles are not cached indefinitely.
 
 A JavaScript/CSS MIME error mentioning `text/html` previously meant missing assets were incorrectly served as the HTML page. It was not an SSH forwarding error. `ObjectMultiplex` messages mentioning MetaMask streams originate from browser extensions. The dashboard does not link to `file:///`; if that error persists, check its browser initiator or retry with browser extensions disabled. If the dashboard reports that a snapshot could not be serialized, refresh the session and check for unsupported or cyclic custom session data. The error is sanitized, and a later valid snapshot recovers automatically.
 
 ## Development
 
 ```bash
-bun install          # dependencies and frontend build
+bun install          # dependencies
 bun run check        # build, HTTP/settings tests, types, lint, formatting
 pi -e ./src/index.ts  # run the extension directly
 ```
